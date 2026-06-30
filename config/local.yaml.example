@@ -1,0 +1,23 @@
+# Copy this to config/local.yaml and edit. local.yaml is gitignored (personal:
+# LAN addresses, model picks, paths) — only this sanitized template is committed.
+# Anything you omit falls back to config/default.yaml.
+
+models:
+  # Point the brain / vision models at another PC on your LAN, or leave blank for local.
+  brain_base_url: ""              # e.g. "http://192.168.x.x:1234/v1"
+  vision_base_url: ""             # e.g. "http://192.168.x.x:1234/v1"
+  vision_model: ""                # pin the exact loaded VL model id, or "" to auto-detect
+  vision_mode: tool               # tool | context
+
+autonomy:
+  confirm_level: risky            # every | risky | never  (never = full control, no prompts)
+  verification: auto              # auto | single | double  (double = brain+vision cross-check)
+  agreement: facts                # facts (deterministic) | model (extra judge call)
+  max_retries: 3
+  max_depth: 2
+
+voice:
+  tts_engine: kokoro              # kokoro | piper
+  kokoro_voice: bm_george         # British male; see Kokoro voices
+  kokoro_speed: 1.3
+  offline: true                   # use only the local model cache; never hit the network

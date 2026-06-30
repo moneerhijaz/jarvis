@@ -1,0 +1,71 @@
+# ===== JARVIS .gitignore =====
+# Goal: never commit secrets, personal data (chats, screenshots, the vault),
+# machine-specific environments, model weights, or build junk.
+
+# --- Local / personal config (LAN IPs, paths, model picks) ---
+config/local.yaml
+config/*.local.yaml
+.env
+.env.*
+
+# --- Runtime + personal data (NEVER canonical) ---
+data/                 # sqlite DB = your conversation history; the vault (JarvisBrain) lives here
+logs/                 # run logs may contain transcripts / paths
+artifacts/            # screenshots of YOUR screen, run outputs — privacy
+**/.jarvis/           # rebuildable vault index cache
+*.sqlite
+*.sqlite-*
+fonts/
+
+# --- Python environments (machine-specific, huge) ---
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# --- Node / frontend build (huge) ---
+node_modules/
+ui/dist/
+ui/.vite/
+
+# --- Model weights & caches (never commit; download separately) ---
+models/
+.cache/
+huggingface/
+*.onnx
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# --- Temp / generated audio ---
+*.wav
+*.mp3
+*.webm
+*.tmp
+
+# --- Stray build/test binaries ---
+*.exe
+*.dll
+*.so
+*.dylib
+test_loop.c
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

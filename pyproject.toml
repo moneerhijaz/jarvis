@@ -1,0 +1,46 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "JARVIS - a local-first personal AI assistant backend (PLANv3)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "httpx>=0.27",
+    "sse-starlette>=2.0",
+    "structlog>=24.1",
+    "PyYAML>=6.0",
+    "send2trash>=1.8",
+    "python-frontmatter>=1.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# Heavy/optional. The backend runs without these; retrieval falls back to
+# keyword+graph when no embedder is present.
+vector = ["lancedb>=0.6", "numpy>=1.26"]
+embed = ["sentence-transformers>=2.6"]
+voice = ["faster-whisper>=1.0", "piper-tts>=1.2"]
+kokoro = ["kokoro>=0.7", "soundfile>=0.12", "numpy>=1.26"]
+# Agentic computer control (AGENTIC_PLAN). Windows desktop automation + screen.
+control = ["mss>=9.0", "Pillow>=10.0", "pyautogui>=0.9.54", "pygetwindow>=0.0.9", "uiautomation>=2.0", "keyboard>=0.13"]
+ocr = ["rapidocr-onnxruntime>=1.3"]   # optional: screen.read_text without a vision model
+websearch = ["ddgs>=6.0"]            # optional: nicer web.search (falls back to scraping)
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "anyio>=4.3"]
+
+[project.scripts]
+jarvisd = "jarvis.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jarvis"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

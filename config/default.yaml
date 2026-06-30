@@ -1,0 +1,75 @@
+# JARVIS default configuration (PLANv3).
+# Layered: these defaults < config file < env vars (JARVIS_*) < runtime settings.
+
+app:
+  host: 127.0.0.1
+  port: 8765
+  data_dir: ./data
+  logs_dir: ./logs
+  artifacts_dir: ./artifacts
+
+autonomy:
+  mode: full_local_autonomy
+  audit_all_tools: true
+  enable_kill_switch: true
+  rollback_where_possible: true
+  tripwires_enabled: true
+  delete_threshold: 50          # bulk-delete count that trips a countdown notice
+
+limits:
+  max_run_steps: 40
+  max_tool_failures: 8
+  max_wall_clock_s: 1800
+  max_tokens: 0                 # 0 = unbounded (local model)
+  default_tool_timeout_s: 120
+  shell_timeout_s: 300
+  max_inline_output_bytes: 65536
+
+models:
+  policy: local-only
+  default_role: brain
+  providers:
+    lmstudio:
+      kind: openai_compatible
+      base_url: http://127.0.0.1:1234/v1
+      api_key: lm-studio
+      timeout_s: 120
+  roles:
+    brain:
+      provider: lmstudio
+      model: auto               # auto = first model LM Studio reports
+      temperature: 0.2
+      tool_strategy: native_or_json
+    fast:
+      enabled: false
+      provider: lmstudio
+      model: auto
+      temperature: 0.1
+    embed:
+      provider: lmstudio
+      model: auto
+
+vault:
+  path: ./data/JarvisBrain      # override to a real location, e.g. C:/Users/<you>/JarvisBrain
+  git_versioning: false         # set true to commit memory edits for free history
+  embed:
+    mode: lmstudio              # none | in_process | lmstudio  (none = keyword+graph only)
+    model: bge-small-en
+  retrieval:
+    graph_hops: 2
+    max_snippets: 12
+    always_load_profile: true
+  gardener:
+    enabled: false              # enable to run scheduled vault maintenance
+    schedule: "0 7 * * *"
+  scope:
+    default: vault              # vault | active_project
+  ignore:
+    - .jarvis/
+    - "*.key"
+    - "*.pem"
+    - "*.env"
+
+connectors:
+  default_access: read_only     # "keys, not prompts"
+  enabled: []

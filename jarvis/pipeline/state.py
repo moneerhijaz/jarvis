@@ -99,6 +99,7 @@ class Pipe(BaseModel):
     request: str
     normalized: str = ""
     history_context: str | None = None
+    memory_context: str | None = None   # relevant snippets retrieved from the vault (RAG)
 
     # feasibility ("does it have all necessary tools")
     feasible: bool = True

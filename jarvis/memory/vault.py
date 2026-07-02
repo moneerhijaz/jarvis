@@ -165,7 +165,18 @@ class Vault:
         return note
 
     def capture(self, text: str, source: str = "manual") -> Note:
-        """Fast path: drop a raw note into inbox/ for the gardener to file later."""
+        """Fast path: drop a raw note into inbox/ for the gardener to file later.
+
+        Memory v2: dedupe-on-write. If a near-identical note already exists, treat this as a
+        recurrence (touch it — a promotion signal) and return it instead of writing a duplicate."""
+        if self.index is not None:
+            dup = self.index.find_duplicate(text)
+            if dup:
+                try:
+                    self.index.store.touch_memory_note(dup)
+                except Exception:
+                    pass
+                return self.read_note(dup)
         title = text.strip().splitlines()[0][:60] if text.strip() else "capture"
         ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         return self.write_note(f"{ts}-{title}", text, folder="inbox", type_="note", source=source)

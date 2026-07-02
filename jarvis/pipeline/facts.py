@@ -17,9 +17,9 @@ _UNITS = {
     "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
     "million": 1_000_000, "billion": 1_000_000_000,
 }
-# Windows drive paths, or unix paths with at least two segments (so "/no_think" or "and/or"
-# aren't mistaken for paths).
-_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s\"'<>|]+|(?:/[^\s\"'<>|/]+){2,}")
+# Windows drive paths (backslash OR forward slash — "C:\a\b" and "c:/a/b" are the same path),
+# or unix paths with at least two segments (so "/no_think" or "and/or" aren't mistaken for paths).
+_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+|(?:/[^\s\"'<>|/]+){2,}")
 _THINK_RE = re.compile(r"(?is)<think>.*?</think>")
 _SCAFFOLD = ("thinking process", "analyze the request", "determine the answer",
              "format the output", "final check", "draft:", "final polish", "refine the output")
@@ -91,10 +91,13 @@ def facts_agree(a: str, b: str) -> tuple[bool, dict]:
     correct context ("two plus two equals four") still agrees with a terse one ("4"): they
     agree as long as neither CONTRADICTS the other. Numbers/paths first; else key-term tokens."""
     fa, fb = extract_facts(a), extract_facts(b)
-    if fa or fb:
+    if fa and fb:
         agree = fa <= fb or fb <= fa     # one set contained in the other = no contradiction
         return agree, {"mode": "facts", "only_in_a": sorted(fa - fb), "only_in_b": sorted(fb - fa),
                        "agree": agree}
+    # If only ONE side has extractable facts, the empty set would be "contained" in anything and
+    # the check would auto-pass — a factless pass must NOT vouch for a factful one. Fall through
+    # to the key-term comparison instead.
     ta, tb = _key_terms(a), _key_terms(b)
     if not ta or not tb:
         agree = _norm_text(a) == _norm_text(b)

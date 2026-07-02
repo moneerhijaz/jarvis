@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram id="v7-pipeline" name="v7-adaptive">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="2400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- legend -->
+        <mxCell id="leg1" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="green = NEW vs your chart">
+          <mxGeometry x="40" y="40" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="yellow = CHANGED behavior">
+          <mxGeometry x="40" y="90" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="white = same as yours">
+          <mxGeometry x="40" y="140" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="flags" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f5f5f5;" value="flags: needs_tools, objective, grounded (NEW), needs_user_info&#10;budget: wall clock + step count, shared by ALL loops">
+          <mxGeometry x="40" y="200" width="260" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- spine -->
+        <mxCell id="n1" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="request">
+          <mxGeometry x="600" y="40" width="160" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="sub request 1: what does it need? (needs_tools, needs_user_info, objective, grounded) — SMALL prompt, no answer drafting here">
+          <mxGeometry x="600" y="130" width="160" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="check needs vs capability index (deterministic where possible)">
+          <mxGeometry x="600" y="260" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" parent="1" vertex="1" style="rhombus;whiteSpace=wrap;html=1;" value="feasible?">
+          <mxGeometry x="620" y="370" width="120" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="workaround search: web? shell? write a script? (ONE pass — no blind re-check loop)">
+          <mxGeometry x="900" y="370" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="verification: double = flag on AND objective AND vision model free">
+          <mxGeometry x="600" y="490" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" parent="1" vertex="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="route (needs_user_info forces multiresponse)">
+          <mxGeometry x="590" y="600" width="180" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- direct -->
+        <mxCell id="n8" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="direct: answer without tools">
+          <mxGeometry x="280" y="740" width="160" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- module -->
+        <mxCell id="n9" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="sub request: plan DAG of steps (ask steps included when multiresponse)">
+          <mxGeometry x="600" y="740" width="160" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n10" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="next ready step (independent steps run in parallel)">
+          <mxGeometry x="600" y="870" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n11" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="bind tool args NOW, from upstream step results (not at plan time)">
+          <mxGeometry x="600" y="980" width="160" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n12" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="risky action + not full permissions? pause for user confirm (deny = FAIL, never replanned)">
+          <mxGeometry x="600" y="1100" width="160" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n13" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="run tool / pose question">
+          <mxGeometry x="600" y="1230" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n14" parent="1" vertex="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="step ok?  (OBSERVE)">
+          <mxGeometry x="620" y="1330" width="120" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n15" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="repair args with the error + prior results (max 3)">
+          <mxGeometry x="900" y="1330" width="170" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n16" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="REPLAN remainder: keep finished results, feed exactly what failed + why, forbid repeating the failed step unchanged (max 2)">
+          <mxGeometry x="900" y="1450" width="170" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="n17" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="ask step: wait for client answer max question_timeout, unanswered = FAIL (never assume)">
+          <mxGeometry x="330" y="1230" width="170" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n18" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;" value="WATCHDOG: budget checked WHILE steps run — hung tool or parked question cannot freeze the run">
+          <mxGeometry x="330" y="1380" width="170" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="n19" parent="1" vertex="1" style="rhombus;whiteSpace=wrap;html=1;" value="more steps?">
+          <mxGeometry x="620" y="1440" width="120" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- draft + verify -->
+        <mxCell id="n20" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="draft answer (compose from step results ONLY)">
+          <mxGeometry x="600" y="1580" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n21" parent="1" vertex="1" style="rhombus;whiteSpace=wrap;html=1;" value="double AND objective?">
+          <mxGeometry x="620" y="1690" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n22" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="second pass (vision host) — fire IN PARALLEL with draft when concurrency=2, not after it">
+          <mxGeometry x="900" y="1690" width="170" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n23" parent="1" vertex="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="facts match? (1 regen max — no agreement by exhaustion)">
+          <mxGeometry x="900" y="1820" width="170" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="n24" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="validity gate: 1) grounding — paths/facts must exist in evidence  2) judge: correct if objective, faithful if grounded, substantive otherwise">
+          <mxGeometry x="600" y="1980" width="160" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="n25" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;" value="REDRAFT with the judge's critique fed back in (max 3) — retry the draft, not the judging">
+          <mxGeometry x="900" y="1980" width="170" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="n26" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;" value="submit final answer">
+          <mxGeometry x="600" y="2180" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n27" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;" value="FAIL: which step + why (+ both drafts on mismatch) — delivered as the answer">
+          <mxGeometry x="1200" y="2180" width="180" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- edges -->
+        <mxCell id="e1" parent="1" edge="1" source="n1" target="n2" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" parent="1" edge="1" source="n2" target="n3" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" parent="1" edge="1" source="n3" target="n4" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" parent="1" edge="1" source="n4" target="n6" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" parent="1" edge="1" source="n4" target="n5" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" parent="1" edge="1" source="n5" target="n3" value="workaround found: re-check WITH it" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=0;entryX=1;entryY=0.5;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" parent="1" edge="1" source="n5" target="n27" value="none" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1290" y="410" /></Array></mxGeometry></mxCell>
+        <mxCell id="e8" parent="1" edge="1" source="n6" target="n7" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" parent="1" edge="1" source="n7" target="n8" value="no tools, no user info" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" parent="1" edge="1" source="n7" target="n9" value="multistep / multiresponse" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" parent="1" edge="1" source="n8" target="n20" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0;entryY=0.5;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="360" y="1615" /></Array></mxGeometry></mxCell>
+        <mxCell id="e12" parent="1" edge="1" source="n9" target="n10" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e13" parent="1" edge="1" source="n10" target="n11" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e14" parent="1" edge="1" source="n11" target="n12" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e15" parent="1" edge="1" source="n12" target="n13" value="approved / not risky" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e16" parent="1" edge="1" source="n13" target="n14" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e17" parent="1" edge="1" source="n13" target="n17" value="ask step" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.25;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e18" parent="1" edge="1" source="n14" target="n19" value="ok" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e19" parent="1" edge="1" source="n14" target="n15" value="failed" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e20" parent="1" edge="1" source="n15" target="n13" value="retry step" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=0;entryX=1;entryY=0.5;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e21" parent="1" edge="1" source="n15" target="n16" value="repairs spent" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e22" parent="1" edge="1" source="n16" target="n10" value="new remainder plan" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.5;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="820" y="1505" /><mxPoint x="820" y="905" /></Array></mxGeometry></mxCell>
+        <mxCell id="e23" parent="1" edge="1" source="n16" target="n27" value="replans spent" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1290" y="1505" /></Array></mxGeometry></mxCell>
+        <mxCell id="e24" parent="1" edge="1" source="n17" target="n27" value="unanswered" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0;entryY=0.5;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="415" y="2225" /></Array></mxGeometry></mxCell>
+        <mxCell id="e25" parent="1" edge="1" source="n17" target="n19" value="answered" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.75;entryX=0;entryY=0.5;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e26" parent="1" edge="1" source="n19" target="n10" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.5;entryX=1;entryY=1;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="800" y="1475" /><mxPoint x="800" y="935" /></Array></mxGeometry></mxCell>
+        <mxCell id="e27" parent="1" edge="1" source="n19" target="n20" value="done" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e28" parent="1" edge="1" source="n20" target="n21" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e29" parent="1" edge="1" source="n21" target="n24" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e30" parent="1" edge="1" source="n21" target="n22" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e31" parent="1" edge="1" source="n22" target="n23" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e32" parent="1" edge="1" source="n23" target="n24" value="agree" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.25;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e33" parent="1" edge="1" source="n23" target="n27" value="disagree: show BOTH" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1290" y="1870" /></Array></mxGeometry></mxCell>
+        <mxCell id="e34" parent="1" edge="1" source="n24" target="n26" value="valid" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e35" parent="1" edge="1" source="n24" target="n25" value="invalid + why" style="edgeStyle=orthogonalEdgeStyle;html=1;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e36" parent="1" edge="1" source="n25" target="n24" value="re-judge" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=0;entryX=1;entryY=0;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="985" y="1950" /></Array></mxGeometry></mxCell>
+        <mxCell id="e37" parent="1" edge="1" source="n25" target="n27" value="redrafts spent" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1290" y="2030" /></Array></mxGeometry></mxCell>
+        <mxCell id="e38" parent="1" edge="1" source="n27" target="n26" value="fail IS the answer" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.5;"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e39" parent="1" edge="1" source="n18" target="n27" value="budget exceeded (from ANY loop)" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.25;entryY=0;dashed=1;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="415" y="2140" /><mxPoint x="1245" y="2140" /></Array></mxGeometry></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -307,6 +307,11 @@ def create_app(app: Application | None = None) -> FastAPI:
         snips = application.retriever.search(body.query, project=body.project, k=body.k)
         return {"results": [s.__dict__ for s in snips]}
 
+    @api.post("/api/memory/consolidate")
+    def memory_consolidate() -> dict[str, Any]:
+        """Run the memory librarian on demand (UI 'Tidy memory' button)."""
+        return application.consolidate_memory()
+
     @api.get("/api/vault/profile")
     def vault_profile() -> dict[str, Any]:
         return {"profile": application.vault.read_profile(),

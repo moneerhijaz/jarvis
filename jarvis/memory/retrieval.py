@@ -7,8 +7,10 @@ keeps the backend runnable with a minimal install.
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -16,8 +18,13 @@ from typing import Callable
 from jarvis.memory.graph import build_graph
 from jarvis.memory.vault import Note, Vault
 
+logger = logging.getLogger("jarvis.memory.retrieval")
 EmbedFn = Callable[[list[str]], list[list[float]]]
 _WORD = re.compile(r"[a-z0-9]+")
+
+# Memory v2 tier-aware ranking. Long-term is trusted and doesn't decay; episodic/short fade by age.
+_TIER_BIAS = {"long": 1.0, "medium": 0.5, "short": 0.5, "archive": -5.0}
+_HALF_LIFE_S = {"medium": 14 * 86400, "short": 3 * 86400}   # long: no decay
 
 
 @dataclass
@@ -68,7 +75,10 @@ class Retriever:
         self.max_snippets = max_snippets
 
     def _scoped_notes(self, project: str | None) -> list[Note]:
-        notes = self.vault.all_notes()
+        # Exclude operational logs under daily/ (auto run-summaries / garden reports) from recall —
+        # they are machine output, not user knowledge, and otherwise flood keyword search.
+        notes = [n for n in self.vault.all_notes()
+                 if not self.vault.rel(n.path).startswith("daily/")]
         if not project:
             return notes
         from jarvis.memory.vault import slugify
@@ -79,11 +89,78 @@ class Retriever:
     def search(self, query: str, project: str | None = None, k: int | None = None) -> list[Snippet]:
         k = k or self.max_snippets
         index = getattr(self.vault, "index", None)
+        store = getattr(index, "store", None)
+        # Memory v2: tier-aware hybrid rank when embeddings + the catalog are available.
+        if self.embed_fn is not None and store is not None:
+            try:
+                hits = self._hybrid_search(store, index, query, project, k)
+                if hits:
+                    return hits
+            except Exception:
+                logger.warning("hybrid search failed; falling back to keyword", exc_info=True)
         if index is not None:
             indexed = self._search_indexed(index, query, project, k)
             if indexed is not None:
                 return indexed
         return self._search_filescan(query, project, k)
+
+    def _hybrid_search(self, store, index, query: str, project: str | None, k: int) -> list[Snippet]:
+        """Blend semantic (cosine) + keyword + graph + tier bias − age decay into one ranking.
+        Archived and daily/ operational notes are excluded upstream (store + index)."""
+        now = time.time()
+        terms = set(_tokens(query))
+
+        # semantic candidates
+        qv = self.embed_fn([query])[0]
+        sem = {r["vault_path"]: _cosine(qv, r["embedding"])
+               for r in store.all_memory_vectors(exclude_archived=True)}
+        # keyword candidates (already excludes daily/ per the v4 ranker fix)
+        kw_rows = index.search(query, project=project, limit=k * 3)
+        n_kw = len(kw_rows)
+        kw = {r["vault_path"]: (n_kw - i) / n_kw for i, r in enumerate(kw_rows)} if n_kw else {}
+        meta = {r["vault_path"]: r for r in kw_rows}
+
+        cands = set(sorted(sem, key=sem.get, reverse=True)[: k * 3]) | set(kw)
+
+        # graph expansion from the strongest seeds
+        graph: dict[str, float] = {}
+        seeds = sorted(cands, key=lambda p: max(sem.get(p, 0.0), kw.get(p, 0.0)), reverse=True)[:5]
+        for s in seeds:
+            for nb in index.neighbors(s, hops=self.graph_hops):
+                graph[nb] = max(graph.get(nb, 0.0), 0.5)
+                cands.add(nb)
+
+        scored: list[tuple[float, str, dict]] = []
+        for vp in cands:
+            if vp.startswith("daily/"):
+                continue
+            row = meta.get(vp) or store.get_memory_note(vp)
+            if not row or row.get("deleted_at"):
+                continue
+            tier = row.get("tier") or "medium"
+            if tier == "archive":
+                continue
+            age = max(0.0, now - (row.get("updated_at") or now))
+            hl = _HALF_LIFE_S.get(tier)
+            decay = (1 - 0.5 ** (age / hl)) if hl else 0.0     # 0..1 penalty that grows with age
+            score = (0.60 * sem.get(vp, 0.0)
+                     + 0.20 * kw.get(vp, 0.0)
+                     + 0.10 * graph.get(vp, 0.0)
+                     + 0.10 * _TIER_BIAS.get(tier, 0.5)
+                     - 0.20 * decay)
+            scored.append((score, vp, row))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        out: list[Snippet] = []
+        for score, vp, row in scored[:k]:
+            text = row.get("summary") or ""
+            try:
+                text = _excerpt(self.vault.read_note(vp).body, terms)
+            except Exception:
+                pass
+            out.append(Snippet(source=vp, title=row.get("title") or vp,
+                               text=text, score=round(score, 3), reason=row.get("tier") or ""))
+        return out
 
     def _search_indexed(self, index, query: str, project: str | None, k: int) -> list[Snippet] | None:
         """Fast path: candidate selection + graph via the SQLite catalog/edges.

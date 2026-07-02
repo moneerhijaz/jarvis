@@ -7,6 +7,7 @@ base_url. Tool calls are normalized into ``ToolCall`` objects.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any, Iterator
@@ -23,6 +24,8 @@ from jarvis.model.client import (
     Usage,
 )
 from jarvis.events import now_iso
+
+logger = logging.getLogger("jarvis.model.lmstudio")
 
 
 _TOOLCALL_BLOCK = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
@@ -96,6 +99,10 @@ class LMStudioClient:
         models = self.list_models()
         if not models:
             raise RuntimeError("LM Studio reports no loaded models")
+        # 'auto' silently used whatever LM Studio listed first — which is how a run meant for
+        # qwen ended up on gemma. Make the implicit choice visible; pin the model to avoid it.
+        logger.warning("brain model is 'auto' -> using LM Studio's first-listed model %r "
+                       "(set models.roles.brain.model in config/local.yaml to pin it)", models[0].id)
         return models[0].id
 
     # -- API --------------------------------------------------------------- #

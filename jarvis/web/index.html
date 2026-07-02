@@ -150,6 +150,7 @@
       <div class="modelwrap"><button id="verifybtn" class="navword" title="Verification: single, or double (brain + vision cross-check)">VERIFY</button>
         <div id="verifymenu" class="modelmenu"></div></div>
       <button id="brainbtn" class="navword" title="Brain / memory">BRAIN</button>
+      <button id="tidybtn" class="navword" title="Tidy memory: merge duplicates, promote recurring facts, group related notes, archive stale">TIDY</button>
       <button id="actbtn" class="navword" title="Action log (review / undo)">ACTIONS</button>
       <button id="chattoggle" class="navword" title="Show/hide chat">CHAT</button>
       <button id="livebtn" class="navword" title="Continuous listening (hands-free)">LIVE</button>
@@ -803,6 +804,18 @@ async function setPermission(val){$("permmenu").classList.remove("open");curPerm
   try{await fetch("/api/settings/permissions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({level:val})});}catch(e){}
   toast(val==="never"?"Full control — admin runs without asking":(val==="every"?"Confirming every action":"Confirming risky actions only"));}
 async function loadPerms(){try{const h=await getHealth();if(h&&h.confirm_level)curPerm=h.confirm_level;}catch(e){}buildPermMenu();}
+
+// ---- Tidy memory (run the librarian: merge / promote / group / archive) ----
+$("tidybtn").onclick=async()=>{
+  const b=$("tidybtn"),orig=b.textContent;b.textContent="TIDYING…";b.disabled=true;
+  try{
+    const r=await fetch("/api/memory/consolidate",{method:"POST"});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    const d=await r.json();
+    addTL("say",`Memory tidied — merged ${d.merged}, promoted ${d.promoted}, archived ${d.archived}, grouped ${d.groups}.`);
+  }catch(e){addTL("say","Memory tidy failed: "+e);}
+  finally{b.textContent=orig;b.disabled=false;}
+};
 
 // ---- Verification level (single vs double brain+vision cross-check) ----
 $("verifybtn").onclick=e=>{e.stopPropagation();const m=$("verifymenu");closeMenus(m);m.classList.toggle("open");};

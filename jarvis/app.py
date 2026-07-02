@@ -7,6 +7,7 @@ Studio client.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 
@@ -62,11 +63,15 @@ class Application:
         self.executor = ToolExecutor(self.registry, self.events, self.store)
 
         self.vault = Vault(self.settings.vault_path)
+        # Memory v2: build the embedder ONCE and share it between the index (writes vectors on
+        # sync) and the retriever (semantic search). May be None if embeddings aren't configured.
+        self._embedder = self._build_embedder()
         from jarvis.memory.index import VaultIndex
-        self.vault.attach_index(VaultIndex(self.store, self.vault))
+        self.vault.attach_index(VaultIndex(self.store, self.vault, embed_fn=self._embedder,
+                                           embed_model=self.settings.vault.embed.model))
         self.retriever = Retriever(
             self.vault,
-            embed_fn=self._build_embedder(),
+            embed_fn=self._embedder,
             graph_hops=self.settings.vault.retrieval.graph_hops,
             max_snippets=self.settings.vault.retrieval.max_snippets,
         )
@@ -125,11 +130,16 @@ class Application:
                                     model=embed_model, timeout_s=prov.timeout_s)
             return lambda texts: client.embed(texts)
         if mode == "in_process":
+            # Local-first: use the HF cache only — no network, no "unauthenticated requests to the
+            # HF Hub" warning. Export HF_HUB_OFFLINE=0 for the one-time model download on a fresh
+            # machine; after that it stays fully offline.
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             try:  # optional dependency
                 from sentence_transformers import SentenceTransformer  # type: ignore
 
                 st_model = SentenceTransformer(self.settings.vault.embed.model)
-                return lambda texts: [v.tolist() for v in st_model.encode(texts)]
+                return lambda texts: [list(map(float, v)) for v in st_model.encode(texts)]
             except Exception:
                 logger.warning(
                     "in_process embedder unavailable (install the 'embed' extra); "
@@ -238,8 +248,44 @@ class Application:
         if self.vault.index is not None:  # populate/refresh the derived catalog
             try:
                 self.vault.index.reindex_all()
+                # Memory v2 one-time housekeeping: drop stale auto-logs out of recall, then embed
+                # any notes still missing a vector (no-op when embeddings are disabled).
+                archived = self.store.archive_operational_logs()
+                if archived:
+                    logger.info("archived %d stale operational logs from recall", archived)
+                self.vault.index.backfill_vectors()
             except Exception:
                 logger.warning("initial vault reindex failed", exc_info=True)
+
+    def consolidate_memory(self) -> dict:
+        """Run the memory librarian on demand (UI button): merge duplicates, promote recurring
+        facts to long-term, decay/archive stale ones, and group related memories into concept
+        notes with descriptions. Deterministic parts always run; grouping needs the embedder."""
+        from jarvis.memory.librarian import Librarian
+        lib = Librarian(self.store, self.vault, embed_fn=self._embedder)
+        rep = lib.consolidate()
+        groups = lib.group_and_describe(self._group_label_fn) if self._embedder is not None else 0
+        return {"merged": rep.merged, "promoted": rep.promoted, "archived": rep.archived,
+                "groups": groups}
+
+    def _group_label_fn(self, texts: list[str]):
+        """LLM label for a memory cluster — supplies only kind + description (the title is derived
+        deterministically by the librarian, so a weak model can't mislabel a group)."""
+        from jarvis.model.client import Message
+        from jarvis.pipeline.runner import _extract_json
+        sysp = ("You organize a personal memory vault. Given related snippets, reply with ONLY a "
+                'JSON object of REAL values, e.g. {"kind":"topic","description":"Notes about the '
+                'user\'s coffee habits."} — do NOT copy the example. "kind" is "entity" if they are '
+                'all about ONE specific person/project/tool, otherwise "topic". /no_think')
+        try:
+            resp = self.model.chat(
+                [Message(role="system", content=sysp),
+                 Message(role="user", content="Snippets:\n" + "\n".join(f"- {t}" for t in texts))],
+                temperature=0.0, max_tokens=160)
+            return _extract_json(resp.content or "")
+        except Exception:
+            logger.warning("group label call failed; librarian will use fallback", exc_info=True)
+            return None
 
     # -- run management ---------------------------------------------------- #
     def new_run(self, message: str, thread_id: str | None = None, working_directory: str | None = None,

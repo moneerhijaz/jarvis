@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);
@@ -70,12 +70,25 @@ CREATE TABLE IF NOT EXISTS memory_notes (
     vault_path TEXT PRIMARY KEY, id TEXT, type TEXT, title TEXT, project_id TEXT,
     source TEXT, source_uri TEXT, created_at REAL, updated_at REAL,
     content_hash TEXT, frontmatter_json TEXT, summary TEXT, search_text TEXT,
-    deleted_at REAL
+    deleted_at REAL,
+    -- Memory v2 (also added to pre-existing DBs via _add_missing_columns):
+    tier TEXT DEFAULT 'medium', salience REAL DEFAULT 1.0, last_accessed REAL,
+    access_count INTEGER DEFAULT 0, confidence REAL DEFAULT 0.7, group_id TEXT,
+    source_run_id TEXT, superseded_by TEXT
 );
 -- Persisted wikilink edges for scalable graph traversal / orphan detection.
 CREATE TABLE IF NOT EXISTS memory_links (
     from_path TEXT, link_text TEXT, created_at REAL,
     PRIMARY KEY (from_path, link_text)
+);
+-- Memory v2: per-note embedding vectors (semantic recall). Markdown stays canonical.
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    vault_path TEXT PRIMARY KEY, embedding BLOB, model TEXT, dim INTEGER, updated_at REAL
+);
+-- Memory v2: entity/topic groups (concept notes / maps-of-content).
+CREATE TABLE IF NOT EXISTS memory_groups (
+    id TEXT PRIMARY KEY, kind TEXT, title TEXT, description TEXT, tier TEXT,
+    centroid BLOB, created_at REAL, updated_at REAL
 );
 
 CREATE INDEX IF NOT EXISTS ix_events_run_seq ON events(run_id, seq);
@@ -101,13 +114,36 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
 
+    # Memory v2 columns added to memory_notes on pre-existing DBs (fresh DBs get them from _SCHEMA).
+    _MEMORY_NOTE_COLUMNS = {
+        "tier": "TEXT DEFAULT 'medium'",
+        "salience": "REAL DEFAULT 1.0",
+        "last_accessed": "REAL",
+        "access_count": "INTEGER DEFAULT 0",
+        "confidence": "REAL DEFAULT 0.7",
+        "group_id": "TEXT",
+        "source_run_id": "TEXT",
+        "superseded_by": "TEXT",
+    }
+
     def _migrate(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # Additive column migration for DBs created before Memory v2. ALTER TABLE ADD COLUMN
+            # is the only safe schema change in SQLite and is idempotent here via the pragma check.
+            existing = {r["name"] for r in self._conn.execute("PRAGMA table_info(memory_notes)")}
+            for col, decl in self._MEMORY_NOTE_COLUMNS.items():
+                if col not in existing:
+                    self._conn.execute(f"ALTER TABLE memory_notes ADD COLUMN {col} {decl}")
+            # Indexes that depend on the (possibly just-added) columns.
+            self._conn.execute("CREATE INDEX IF NOT EXISTS ix_memory_notes_tier ON memory_notes(tier)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS ix_memory_notes_group ON memory_notes(group_id)")
             cur = self._conn.execute("SELECT version FROM schema_info LIMIT 1")
             row = cur.fetchone()
             if row is None:
                 self._conn.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
+            elif row["version"] < SCHEMA_VERSION:
+                self._conn.execute("UPDATE schema_info SET version=?", (SCHEMA_VERSION,))
             self._conn.commit()
 
     @property
@@ -303,6 +339,117 @@ class Store:
     def get_memory_note(self, vault_path: str) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM memory_notes WHERE vault_path=? AND deleted_at IS NULL", (vault_path,))
         return rows[0] if rows else None
+
+    # -- Memory v2: tier / lifecycle -------------------------------------- #
+    def set_memory_tier(self, vault_path: str, tier: str, *, salience: float | None = None,
+                        group_id: str | None = None, superseded_by: str | None = None) -> None:
+        """Move a note between tiers (short|medium|long|archive). Never deletes — 'archive' is the
+        terminal, recall-excluded tier, and superseded_by records merge/replacement lineage."""
+        sets, params = ["tier=?"], [tier]
+        if salience is not None:
+            sets.append("salience=?"); params.append(salience)
+        if group_id is not None:
+            sets.append("group_id=?"); params.append(group_id)
+        if superseded_by is not None:
+            sets.append("superseded_by=?"); params.append(superseded_by)
+        params.append(vault_path)
+        self._exec(f"UPDATE memory_notes SET {', '.join(sets)} WHERE vault_path=?", tuple(params))
+
+    def touch_memory_note(self, vault_path: str) -> None:
+        """Record a recall hit: bump access_count + last_accessed (feeds recurrence promotion)."""
+        self._exec("UPDATE memory_notes SET access_count=COALESCE(access_count,0)+1, last_accessed=? "
+                   "WHERE vault_path=?", (time.time(), vault_path))
+
+    def set_memory_meta(self, vault_path: str, *, confidence: float | None = None,
+                        source_run_id: str | None = None) -> None:
+        sets, params = [], []
+        if confidence is not None:
+            sets.append("confidence=?"); params.append(confidence)
+        if source_run_id is not None:
+            sets.append("source_run_id=?"); params.append(source_run_id)
+        if not sets:
+            return
+        params.append(vault_path)
+        self._exec(f"UPDATE memory_notes SET {', '.join(sets)} WHERE vault_path=?", tuple(params))
+
+    def archive_operational_logs(self) -> int:
+        """One-time cleanup: mark stale auto-generated run/garden logs under daily/ as archived so
+        they are excluded from recall. Files stay on disk (never delete). Returns count archived."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE memory_notes SET tier='archive' "
+                "WHERE (vault_path LIKE 'daily/run-%' OR vault_path LIKE 'daily/garden-%') "
+                "AND (tier IS NULL OR tier!='archive')")
+            self._conn.commit()
+            return cur.rowcount
+
+    # -- Memory v2: embedding vectors ------------------------------------- #
+    def set_memory_vector(self, vault_path: str, embedding: list[float], model: str, dim: int) -> None:
+        import array
+        blob = array.array("f", embedding).tobytes()
+        self._exec("INSERT INTO memory_vectors(vault_path,embedding,model,dim,updated_at) "
+                   "VALUES (?,?,?,?,?) ON CONFLICT(vault_path) DO UPDATE SET "
+                   "embedding=excluded.embedding, model=excluded.model, dim=excluded.dim, "
+                   "updated_at=excluded.updated_at",
+                   (vault_path, blob, model, dim, time.time()))
+
+    @staticmethod
+    def _unpack_vec(blob: bytes) -> list[float]:
+        import array
+        a = array.array("f"); a.frombytes(blob)
+        return list(a)
+
+    def get_memory_vector(self, vault_path: str) -> list[float] | None:
+        rows = self._query("SELECT embedding FROM memory_vectors WHERE vault_path=?", (vault_path,))
+        return self._unpack_vec(rows[0]["embedding"]) if rows else None
+
+    def all_memory_vectors(self, exclude_archived: bool = True) -> list[dict[str, Any]]:
+        """All (vault_path, embedding) for brute-force cosine search. Skips archived/daily notes
+        and any whose note row is deleted."""
+        rows = self._query(
+            "SELECT v.vault_path AS vault_path, v.embedding AS embedding FROM memory_vectors v "
+            "JOIN memory_notes n ON n.vault_path=v.vault_path "
+            "WHERE n.deleted_at IS NULL "
+            + ("AND n.tier!='archive' AND n.vault_path NOT LIKE 'daily/%'" if exclude_archived else ""))
+        return [{"vault_path": r["vault_path"], "embedding": self._unpack_vec(r["embedding"])} for r in rows]
+
+    def paths_without_vectors(self) -> list[str]:
+        """Notes in the catalog that have no stored embedding yet (for backfill)."""
+        rows = self._query(
+            "SELECT n.vault_path AS vault_path FROM memory_notes n "
+            "LEFT JOIN memory_vectors v ON v.vault_path=n.vault_path "
+            "WHERE n.deleted_at IS NULL AND v.vault_path IS NULL")
+        return [r["vault_path"] for r in rows]
+
+    # -- Memory v2: groups (entity / topic concept notes) ----------------- #
+    def upsert_memory_group(self, group: dict[str, Any]) -> None:
+        import array
+        centroid = group.get("centroid")
+        blob = array.array("f", centroid).tobytes() if centroid else None
+        now = time.time()
+        self._exec(
+            "INSERT INTO memory_groups(id,kind,title,description,tier,centroid,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "kind=excluded.kind, title=excluded.title, description=excluded.description, "
+            "tier=excluded.tier, centroid=excluded.centroid, updated_at=excluded.updated_at",
+            (group["id"], group.get("kind", "topic"), group.get("title"), group.get("description"),
+             group.get("tier", "long"), blob, now, now))
+
+    def list_memory_groups(self) -> list[dict[str, Any]]:
+        return self._query("SELECT id,kind,title,description,tier,created_at,updated_at "
+                           "FROM memory_groups ORDER BY updated_at DESC")
+
+    def group_members(self, group_id: str) -> list[dict[str, Any]]:
+        return self._query("SELECT * FROM memory_notes WHERE group_id=? AND deleted_at IS NULL "
+                           "ORDER BY updated_at DESC", (group_id,))
+
+    def clear_memory_groups(self) -> None:
+        """Drop all groups and un-stamp members. Groups are derived (rebuilt by the librarian), so
+        this is safe — used to reset after a bad grouping pass."""
+        with self._lock:
+            self._conn.execute("DELETE FROM memory_groups")
+            self._conn.execute("UPDATE memory_notes SET group_id=NULL WHERE group_id IS NOT NULL")
+            self._conn.commit()
 
     def search_memory_notes(self, query: str, project_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         like = f"%{query}%"

@@ -23,7 +23,7 @@ from jarvis.pipeline.facts import facts_agree, strip_reasoning, ungrounded_facts
 from jarvis.pipeline.state import Budget, Pipe, Question, Result, Task
 from jarvis.pipeline.types import RunResult
 from jarvis.model.client import Message, ToolCall
-from jarvis.security.redaction import redact_obj
+from jarvis.security.redaction import redact, redact_obj
 from jarvis.tools.base import ToolContext
 
 logger = logging.getLogger("jarvis.pipeline.runner")
@@ -119,6 +119,52 @@ def _extract_json(text: str) -> dict:
     return {}
 
 
+def _verdict(data: dict, text: str):
+    """Extract a validity verdict from a judge reply. Returns True/False, or None when NO verdict
+    could be parsed (the judge rambled without emitting one). None lets the caller fail OPEN — a
+    QA step that malfunctions must not discard a correct answer. A genuine false still fails."""
+    if isinstance(data, dict) and "valid" in data:
+        v = data["valid"]
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "yes", "valid", "1")
+    low = _THINK.sub("", text or "").lower()
+    if re.search(r'"?valid"?\s*[:=]\s*false|\binvalid\b|\bnot\s+(?:valid|correct|faithful)\b|'
+                 r'\bincorrect\b|does ?n[o\']t\s+(?:answer|match)', low):
+        return False
+    if re.search(r'"?valid"?\s*[:=]\s*true|\bis\s+valid\b|\bis\s+correct\b|'
+                 r'genuine answer|faithfully supported', low):
+        return True
+    return None
+
+
+def _describe_field(name: str, p: dict, required: bool) -> str:
+    """One human line per tool argument: name (type, required/optional[, default]): description.
+    Deliberately does NOT dump the raw JSON-schema dict — showing the schema makes small models
+    echo it back verbatim ({"path": {"type":"string",...}}) instead of producing a real value."""
+    typ = p.get("type")
+    if not typ and p.get("anyOf"):
+        typ = " | ".join(s.get("type", "any") for s in p["anyOf"] if s.get("type") != "null") or "any"
+    req = "required" if required else "optional"
+    default = f", default {json.dumps(p['default'])}" if "default" in p else ""
+    desc = (p.get("description") or "").strip()
+    return f'- {name} ({typ or "any"}, {req}{default})' + (f": {desc}" if desc else "")
+
+
+def _fields_block(schema: dict) -> tuple[str, list]:
+    props = schema.get("properties", {}) or {}
+    required = schema.get("required", []) or []
+    lines = "\n".join(_describe_field(n, p, n in required) for n, p in props.items())
+    return (lines or "(this tool takes no arguments)"), required
+
+
+# "Remember/save this for later" must actually write to memory, not just be acknowledged in prose.
+_MEM_WRITE = re.compile(
+    r"\b(remember|memoriz\w*|save (?:this|that|it|the)|store (?:this|that|it)|note that|"
+    r"keep in mind|don'?t forget|jot (?:this|that|it) down|for later)\b", re.I)
+
+
 # A "direct" answer that falsely claims incapability the tools cover -> re-route to tooled.
 _DENIAL = re.compile(
     r"\b(can(?:no|')?t|cannot|unable to|do(?:n'?t| not)? have (?:access|the ability)|no access|"
@@ -166,26 +212,18 @@ class PipelineRunner:
         retries = max(1, getattr(self.settings.autonomy, "max_retries", 3))
         try:
             self._normalize(pipe, req)
-            # Stage 1 (v6): tool requirements + feasibility — re-checked up to `retries` times
-            # before failing with explanation.
-            for attempt in range(retries):
-                pipe.tool_fail = attempt
-                await self._classify(pipe, model)
-                if pipe.feasible:
-                    break
-                if attempt < retries - 1:
-                    await self.events.emit(req.run_id, THOUGHT,
-                                           {"content": f"Re-checking tool requirements ({attempt + 1}/{retries})…"})
-            if not pipe.feasible:
+            # Stage 1 (v7): tool requirements + feasibility. Infeasible-with-workaround gets ONE
+            # informed re-check (web/shell/script declared); otherwise refuse immediately.
+            if not await self._check_feasible(pipe, model):
                 await self._say(pipe, f"Feasibility: NO — missing {pipe.missing}. Failing with explanation.")
                 pipe.answer = self._refusal(pipe)
                 pipe.status = "refused"
                 return await self._respond(pipe, ctx)
 
-            # v6: concurrency = 2 only when a second pass is actually worth it — double on AND an
+            # concurrency = 2 only when a second pass is actually worth it — double on AND an
             # objective (single-correct-answer) request. Subjective requests have no "right" answer,
             # so there's nothing to cross-check: run one pass and take it.
-            pipe.concurrency = 2 if (pipe.verification == "double" and pipe.objective) else 1
+            pipe.concurrency = 2 if self._double_eligible(pipe) else 1
             vmode = "objective" if pipe.objective else ("grounded" if pipe.grounded else "open")
             await self._say(pipe, f"Tools: {'none' if pipe.level == 'direct' else 'needed'} · "
                                   f"objective: {'yes' if pipe.objective else 'no'} · "
@@ -197,7 +235,17 @@ class PipelineRunner:
 
             if pipe.level == "direct":
                 await self._say(pipe, "Direct: answering without tools.")
-                pipe.draft_a = pipe.draft_a or Result(kind="prose", text="", source="brain")
+                # v7: classify no longer drafts. When double is eligible, brain and vision draft
+                # the SAME request in parallel (that's the point of the two hosts) instead of
+                # vision re-drafting after the brain finished.
+                vmodel = self._vision_model() if self._double_eligible(pipe) else None
+                if vmodel is not None:
+                    await self._say(pipe, "Double verification: brain + vision drafting in parallel.")
+                    pipe.draft_a, pipe.draft_b = await asyncio.gather(
+                        self._answer_direct(model, pipe, source="brain"),
+                        self._answer_direct(vmodel, pipe, source="vision"))
+                else:
+                    pipe.draft_a = await self._answer_direct(model, pipe, source="brain")
             else:
                 # 3-try planner: planning is nondeterministic (a reasoning leak or malformed JSON
                 # yields no tasks), so re-plan up to `retries` before failing.
@@ -216,16 +264,15 @@ class PipelineRunner:
                                         "steps": [t.intent for t in pipe.tasks.values()],
                                         "approach": pipe.level, "assessment": ""})
                 await self._say(pipe, f"Plan ready: {len(steps)} step(s). Executing.")
-                await run_pipeline(pipe, self._run_task, budget, lambda: req.run_id in self._cancelled)
-                if pipe.status == "failed":
+                if not await self._execute_with_replan(pipe, model, budget, req):
                     return await self._fail(pipe, pipe.failure or "execution failed")
                 await self._say(pipe, "All steps complete. Drafting answer.")
                 pipe.draft_a = self._terminal_result(pipe)
 
-            # v6 double-match: gated on double AND objective; retry up to `retries`, else FAIL.
+            # v7 double-match: draft B was produced in parallel; compare once, regen once, else FAIL.
             if self._wants_double(pipe):
                 await self._say(pipe, "Double verification: cross-checking brain vs vision.")
-                if not await self._match_passes(pipe, retries):
+                if not await self._match_passes(pipe):
                     return await self._fail(pipe, pipe.failure or "the two passes disagree")
             elif pipe.verification == "double":
                 await self._say(pipe, "Double verification: skipped (not an objective single-answer request).")
@@ -238,6 +285,7 @@ class PipelineRunner:
             await self._say(pipe, "Verification layer: passed.")
 
             pipe.answer = ((pipe.draft_a.text if pipe.draft_a else "") or "").strip() or "Done."
+            self._maybe_extract_memories(pipe)   # Memory v2: form memories off the response path
             return await self._respond(pipe, ctx)
         except _Cancelled:
             return await self._cancel(pipe)
@@ -265,28 +313,56 @@ class PipelineRunner:
                 pipe.history_context = ("Earlier in this conversation (context only, already "
                                         "handled):\n" + "\n".join(lines))
 
+        # RAG: surface relevant saved notes so recall works even on the direct path. Without this
+        # the model has no way to know a fact the user stored earlier and (correctly) refuses.
+        # Keyword-ranked and capped; clearly labelled so an irrelevant hit is easy to ignore.
+        if self.retriever is not None:
+            try:
+                hits = self.retriever.search(pipe.normalized, k=4) or []
+            except Exception:
+                logger.warning("memory retrieval failed", exc_info=True)
+                hits = []
+            snips = [" ".join((getattr(h, "text", "") or "").split())[:240] for h in hits]
+            snips = [s for s in snips if s]
+            if snips:
+                pipe.memory_context = (
+                    "Relevant notes from your saved memory (use ONLY if they answer the request; "
+                    "ignore if unrelated):\n" + "\n".join(f"- {s}" for s in snips[:4]))
+
     # ===================== Stage 1: tool requirements + feasibility (per your graph) =====================
     # The model only reports WHAT the task needs. The code derives the reasoning level, so the
     # tool gate always runs first and ANY tool requirement forces multistep — "direct" is reserved
     # strictly for requests that need no tools at all.
-    async def _classify(self, pipe: Pipe, model) -> None:
+    async def _classify(self, pipe: Pipe, model, workaround: str = "") -> None:
+        """v7: ONE small job — fill the flags. It does NOT draft an answer (drafting happens in
+        the module, where it belongs); a smaller prompt misparses far less on a local model.
+        ``workaround`` re-runs the check telling the model it may lean on web/shell/scripting."""
         caps = ", ".join(self.registry.capability_index().capabilities())
+        wk_note = ""
+        if workaround:
+            how = {"web": "searching or browsing the web",
+                   "shell": "running shell commands",
+                   "build_script": "writing and running a small script"}.get(workaround, workaround)
+            wk_note = (" The direct capability appeared to be missing, but you MAY be able to "
+                       f"accomplish this by {how} — treat the request as feasible if that would "
+                       "genuinely work.")
         sysp = (
-            "Work out what this request NEEDS before answering. You CAN see the screen "
+            "Work out what this request NEEDS. Do NOT answer the request itself. You CAN see the screen "
             "(screen.look / screen.read_text through the vision model), read files, run commands, control apps, and browse "
             "the web — all through tools. NEVER claim you cannot see the screen or access this "
             "computer; that is false. Anything about the user's screen, files, apps, windows, "
             "system, or anything 'right now' / 'currently' / 'my …' on this PC, or that needs the "
-            "web or running something, REQUIRES tools. Respond ONLY JSON:\n"
+            "web or running something, REQUIRES tools. Saving, remembering, storing, or noting "
+            "something for later ALSO requires tools (the memory tool) — never just acknowledge it."
+            + wk_note + " Respond ONLY JSON:\n"
             '{"needs_tools": true|false,        // does it need ANY tool/action on the computer or web?\n'
             ' "feasible": true|false,           // can it be done with the available capabilities?\n'
             ' "missing": "<what is lacking, if not feasible>",\n'
             ' "workaround": "web|shell|build_script|none",\n'
             ' "needs_user_info": true|false,    // must you ask the user for info you cannot get yourself?\n'
             ' "objective": true|false,          // single non-arguable correct answer (math/fact/count/path)?\n'
-            ' "grounded": true|false,           // must the answer reflect what the tools find '
+            ' "grounded": true|false}           // must the answer reflect what the tools find '
             '(e.g. summarize/describe my screen or a file)? true whenever the answer depends on tool output\n'
-            ' "answer": "<full answer — ONLY if needs_tools is false>"}\n'
             f"Available capabilities: {caps} /no_think")
         data = await self._json(model, sysp, self._user(pipe))
         pipe.feasible = bool(data.get("feasible", True))
@@ -298,24 +374,37 @@ class PipelineRunner:
             pipe.workaround = wk if wk in ("web", "shell", "build_script", "none") else "none"
             return
         # Derive the reasoning level in CODE (the model doesn't pick it):
-        #   needs tools           -> multistep (or multiresponse if it must ask the user)
-        #   no tools needed       -> direct, using the model's answer
         needs_tools = bool(data.get("needs_tools", False))
         if self._visual_correction_request(pipe):
             needs_tools = True
             pipe.grounded = True
-        ans = strip_reasoning(str(data.get("answer") or "").strip())
-        if not needs_tools and ans and not _DENIAL.search(ans):
-            pipe.level = "direct"
-            pipe.draft_a = Result(kind="prose", text=ans, source="brain")
-        elif bool(data.get("needs_user_info")):
+        if _MEM_WRITE.search(pipe.normalized):     # "remember/save this" must call the memory tool
+            needs_tools = True
+        # v7 routing fix: a needed user answer forces multiresponse EVEN for tool-free requests
+        # ("write the email" — to whom?). Previously such requests routed direct, which can't ask.
+        if bool(data.get("needs_user_info")):
             pipe.level = "multiresponse"
+        elif needs_tools:
+            pipe.level = "multistep"
         else:
-            pipe.level = "multistep"     # any tool requirement (or empty/denial answer) -> multistep
+            pipe.level = "direct"
         # verification level: "single" forces one pass; "double"/"auto" need a 2nd model host.
         pref = getattr(self.settings.autonomy, "verification", "auto")
         pipe.verification = "single" if pref == "single" else (
             "double" if self._has_second_model() else "single")
+
+    async def _check_feasible(self, pipe: Pipe, model) -> bool:
+        """v7: classify once; if infeasible WITH a plausible workaround, re-check exactly once
+        with the workaround declared (an informed retry), instead of blind re-checks that ask
+        the same question and get the same answer. Still infeasible -> refuse."""
+        await self._classify(pipe, model)
+        if not pipe.feasible and pipe.workaround != "none":
+            await self._say(pipe, f"Missing {pipe.missing} — checking a workaround "
+                                  f"({pipe.workaround}).")
+            await self._classify(pipe, model, workaround=pipe.workaround)
+            if not pipe.feasible:
+                pipe.workaround = "none"      # tried and failed — don't offer it in the refusal
+        return pipe.feasible
 
     def _refusal(self, pipe: Pipe) -> str:
         offer = {"web": " I could search the web for a way if you'd like.",
@@ -328,47 +417,79 @@ class PipelineRunner:
     async def _plan(self, pipe: Pipe, model) -> None:
         if self._force_visible_click_plan(pipe):
             return
+        if self._force_capture_plan(pipe):     # "remember X" -> deterministic vault.capture
+            return
         names = [n for n in self.registry.names() if n not in _META]   # hide meta-tools from the planner
         catalog = self.registry.capability_index().catalog(names)
         ask_note = (' For a step that needs information only the user has, use '
                     '{"kind":"ask","question":"..."} and make later steps depend on it.'
                     if pipe.level == "multiresponse" else "")
         sysp = (
-            "Break the request into a small graph of steps. Respond ONLY JSON: "
+            "Break the request into a small graph of steps that directly produces the answer — the "
+            "fewest steps possible. Respond ONLY JSON: "
             '{"tasks":[{"id":"t1","intent":"...","tool":"<exact tool id>","depends_on":[]}, ...]}. '
             "Each step binds to ONE real tool id (they contain a dot, e.g. screen.look, "
-            "input.press). depends_on lists the ids whose results this step needs. Keep it minimal."
+            "input.press). depends_on lists the ids whose results this step needs.\n"
+            "Rules — follow strictly:\n"
+            "- Include ONLY steps needed to ANSWER. The final reply is composed automatically from "
+            "the steps' results; do NOT add a step to summarize, format, extract, or 'tell the user'.\n"
+            "- Do NOT save, store, remember, log, or write notes about results (no vault.capture, no "
+            "vault.write_note) UNLESS the user explicitly asked to save or remember something.\n"
+            "- Do NOT re-read or re-extract data a previous step already returns (e.g. never use "
+            "screen.read_text to read a file list you already fetched with fs.list).\n"
+            "- Most simple reads are ONE tool. Prefer the fewest steps possible.\n"
+            "- To recall something the user told you earlier or that was stored in memory, use "
+            "vault.search with the key terms — do NOT guess a note path with vault.read_note.\n"
             + ask_note + "\nTools:\n" + catalog + " /no_think")
         data = await self._json(model, sysp, self._user(pipe), max_tokens=700)
+        self._ingest_plan(pipe, data)
+
+    def _ingest_plan(self, pipe: Pipe, data, id_suffix: str = "") -> set[str]:
+        """Parse a planner reply into tasks on the pipe and wire the final compose task.
+        ``id_suffix`` de-collides new ids from tasks that already exist (a re-plan keeps the
+        completed tasks, so the new steps must not reuse their ids). Returns the ids added."""
         raw = data.get("tasks") if isinstance(data, dict) else None
         if not raw and isinstance(data, list):
             raw = data
-        valid_ids: set[str] = set()
+        pipe.tasks.pop("compose", None)                # re-wired below over old + new tasks
+        pipe.results.pop("compose", None)
+        pre_existing = set(pipe.tasks.keys())
+        rename: dict[str, str] = {}
+        new_ids: set[str] = set()
         for s in (raw or [])[:8]:
             if not isinstance(s, dict):
                 continue
             kind = str(s.get("kind", "leaf")).lower()
             tid = str(s.get("id") or f"t{len(pipe.tasks) + 1}")
+            if id_suffix and (tid in pre_existing or tid in new_ids):
+                rename[tid] = f"{tid}{id_suffix}"
+                tid = rename[tid]
+            deps = [d for d in (s.get("depends_on") or []) if isinstance(d, str)]
+            deps = [rename.get(d, d) for d in deps]
+            deps = [d for d in deps if d != tid]       # renaming must never create a self-dep
             if kind == "ask":
                 pipe.add(Task(id=tid, kind="ask", intent=str(s.get("intent") or "ask the user"),
                               question=str(s.get("question") or s.get("intent") or "Could you clarify?"),
-                              depends_on=[d for d in (s.get("depends_on") or []) if isinstance(d, str)]))
-                valid_ids.add(tid)
+                              depends_on=deps))
+                new_ids.add(tid)
                 continue
             tool = self._resolve_tool(str(s.get("tool", "")))
             if not tool:
                 continue
             pipe.add(Task(id=tid, kind="leaf", intent=str(s.get("intent") or tool), tool=tool,
                           args=s.get("args") if isinstance(s.get("args"), dict) else {},
-                          depends_on=[d for d in (s.get("depends_on") or []) if isinstance(d, str)]))
-            valid_ids.add(tid)
-        # prune dangling deps, then add a final compose task that converges everything
+                          depends_on=deps))
+            new_ids.add(tid)
+        if not new_ids:
+            return new_ids
+        # prune dangling deps (a dep must be a real task), then converge everything — old
+        # completed tasks AND the new ones — into one compose task.
+        allowed = set(pipe.tasks.keys())
         for t in pipe.tasks.values():
-            t.depends_on = [d for d in t.depends_on if d in valid_ids]
-        if pipe.tasks:
-            cid = "compose"
-            pipe.add(Task(id=cid, kind="compose", intent="compose the answer",
-                          depends_on=list(valid_ids)))
+            t.depends_on = [d for d in t.depends_on if d in allowed]
+        pipe.add(Task(id="compose", kind="compose", intent="compose the answer",
+                      depends_on=sorted(allowed)))
+        return new_ids
 
     def _force_visible_click_plan(self, pipe: Pipe) -> bool:
         """Explicit visible target actions should use the screen-targeting click tool.
@@ -396,6 +517,26 @@ class PipelineRunner:
             depends_on=[],
         ))
         pipe.add(Task(id="compose", kind="compose", intent="compose the answer", depends_on=[click.id]))
+        return True
+
+    @staticmethod
+    def _memory_text(s: str) -> str:
+        """Strip a leading 'remember/save/note that …' imperative so we store the FACT, not the
+        command ('Remember, I'm building BlueFalcon' -> 'I'm building BlueFalcon')."""
+        t = re.sub(r"^(please\s+)?(remember|memoriz\w*|note|save|store|keep in mind|don'?t forget|"
+                   r"jot down)\b[\s,:.\-]*(that\s+|to\s+|this[:,]?\s+)?", "", s or "", flags=re.I).strip()
+        return t or (s or "")
+
+    def _force_capture_plan(self, pipe: Pipe) -> bool:
+        """A memory-write request ('remember X', 'save this') should deterministically CAPTURE the
+        fact — not be handed to the planner, which mis-plans it as reading a profile note that
+        doesn't exist (observed live). One vault.capture step with the fact baked in."""
+        if not _MEM_WRITE.search(pipe.normalized or "") or not self._has_tool("vault.capture"):
+            return False
+        cap = pipe.add(Task(id="t1", kind="leaf", intent="save this to memory",
+                            tool="vault.capture", args={"text": self._memory_text(pipe.normalized)},
+                            depends_on=[]))
+        pipe.add(Task(id="compose", kind="compose", intent="compose the answer", depends_on=[cap.id]))
         return True
 
     def _visual_correction_request(self, pipe: Pipe) -> bool:
@@ -482,6 +623,67 @@ class PipelineRunner:
             if re.search(rf"\b{noun}s?\b", low):
                 return noun
         return ""
+
+    # ===================== execute with bounded re-planning =====================
+    # Failures that carry no new information for a planner, or that MUST stay terminal:
+    # user intent (cancel/denial/unanswered question) and exhausted budgets.
+    _NO_REPLAN = ("cancelled", "denied by user", "question was not answered",
+                  "recursion limit reached", "time budget exceeded", "task budget exceeded",
+                  "dependency cycle")
+
+    async def _execute_with_replan(self, pipe: Pipe, model, budget: Budget, req) -> bool:
+        """Run the task graph; when a step fails, re-plan the REMAINDER with the failure and the
+        completed results as context — up to autonomy.max_replans — instead of dying on the first
+        error. Fail-visible is preserved (decision #1): after the replans are spent, or for
+        non-replannable failures, the run still fails with the precise reason. Unlike the blind
+        stage retries, every re-plan feeds NEW information (what succeeded, what failed, why)
+        back to the planner so it can route around the failure."""
+        replans = max(0, getattr(self.settings.autonomy, "max_replans", 2))
+        for attempt in range(replans + 1):
+            await run_pipeline(pipe, self._run_task, budget, lambda: req.run_id in self._cancelled)
+            if pipe.status != "failed":
+                return True
+            why = pipe.failure or "execution failed"
+            if attempt >= replans or not self._replannable(why):
+                return False
+            await self._say(pipe, f"Step failed — {why}. Re-planning the remainder "
+                                  f"({attempt + 1}/{replans}).")
+            if not await self._replan(pipe, model, why):
+                await self._say(pipe, "Re-planning produced no viable alternative; failing.")
+                return False               # keep the ORIGINAL failure as the reason
+            pipe.status = "running"
+            pipe.failure = None
+        return False
+
+    def _replannable(self, why: str) -> bool:
+        low = (why or "").lower()
+        return not any(s in low for s in self._NO_REPLAN)
+
+    async def _replan(self, pipe: Pipe, model, failure: str) -> bool:
+        """Plan the remaining work, keeping every finished result. The new plan sees what was
+        already done and exactly what failed, so it can choose a different tool or approach
+        rather than repeat the failed step verbatim."""
+        done = {tid: r for tid, r in pipe.results.items() if r.ok and tid != "compose"}
+        for tid in [t for t, task in pipe.tasks.items() if task.state != "done"]:
+            pipe.tasks.pop(tid, None)      # drop unfinished tasks; completed ones stay
+        names = [n for n in self.registry.names() if n not in _META]
+        catalog = self.registry.capability_index().catalog(names)
+        done_note = "\n".join(f"- {tid} ({(pipe.tasks[tid].intent if tid in pipe.tasks else tid)}): "
+                              f"{json.dumps(r.data, default=str)[:300] or r.text[:300]}"
+                              for tid, r in done.items())
+        sysp = (
+            "A previous plan for this request failed partway. Plan ONLY the remaining steps. "
+            'Respond ONLY JSON: {"tasks":[{"id":"r1","intent":"...","tool":"<exact tool id>",'
+            '"depends_on":[]}, ...]}. Each step binds to ONE real tool id (they contain a dot). '
+            "Do NOT repeat the failed step unchanged — pick a different tool or approach for it. "
+            "depends_on may reference completed step ids to reuse their results. Keep it minimal."
+            "\nTools:\n" + catalog + " /no_think")
+        user = (f"Request: {self._user(pipe)}\n"
+                f"Already completed:\n{done_note or '(nothing yet)'}\n"
+                f"What failed: {failure}")
+        data = await self._json(model, sysp, user, max_tokens=700)
+        suffix = f"_r{len([t for t in pipe.tasks if '_r' in t]) + 1}"
+        return bool(self._ingest_plan(pipe, data, id_suffix=suffix))
 
     # ===================== task runner (dispatch) =====================
     async def _run_task(self, task: Task, pipe: Pipe, budget: Budget) -> Result:
@@ -584,8 +786,13 @@ class PipelineRunner:
         self._questions[qid] = fut
         pipe.status = "awaiting_user"
         await self.events.emit(pipe.run_id, QUESTION_ASKED, {"question_id": qid, "text": task.question})
+        timeout = max(1, getattr(self.settings.autonomy, "question_timeout_s", 600))
         try:
-            answer = await fut                       # parked until the API resolves it
+            # Parked until the API resolves it — but bounded: an unanswered question FAILS the
+            # run (decision #4) instead of freezing it forever.
+            answer = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            return Result(ok=False, error=f"question was not answered within {timeout}s: {task.question!r}")
         except asyncio.CancelledError:
             return Result(ok=False, error="question was not answered")
         finally:
@@ -605,6 +812,15 @@ class PipelineRunner:
                                  for k, r in inputs.items())
             return Result(ok=True, kind="prose", text=action_answer,
                           data={"evidence": evidence}, source="brain")
+        # v7: when double is eligible, brain and vision compose over the SAME evidence in
+        # parallel — the second opinion costs no extra wall time (separate hosts).
+        vmodel = self._vision_model() if self._double_eligible(pipe) else None
+        if vmodel is not None:
+            a, b = await asyncio.gather(
+                self._compose(self._pick_default_model(), pipe, inputs, source="brain"),
+                self._compose(vmodel, pipe, inputs, source="vision"))
+            pipe.draft_b = b
+            return a
         return await self._compose(self._pick_default_model(), pipe, inputs, source="brain")
 
     def _action_answer(self, pipe: Pipe, inputs: dict[str, Result]) -> str:
@@ -646,7 +862,7 @@ class PipelineRunner:
         try:
             resp = await asyncio.to_thread(lambda: model.chat(
                 [Message(role="system", content=sysp), Message(role="user", content=user)],
-                None, temperature=0.2, max_tokens=700))
+                None, temperature=0.2, max_tokens=1500))   # final answer — room for a long reply
             txt = strip_reasoning((resp.content or "").strip())
         except Exception as e:
             return Result(ok=False, error=f"compose failed: {e}")
@@ -667,44 +883,52 @@ class PipelineRunner:
         m = self.settings.models
         return bool(getattr(m, "vision_base_url", "")) and self.resolve_model is not None
 
-    def _wants_double(self, pipe: Pipe) -> bool:
-        if pipe.verification != "double":
+    def _double_eligible(self, pipe: Pipe) -> bool:
+        """v7: can this run use the brain+vision cross-check? Decided BEFORE drafting so the two
+        passes fire in parallel. Vision-using runs are forced single (the VLM is busy being the
+        eyes); subjective requests have nothing to cross-check."""
+        if pipe.verification != "double" or not pipe.objective:
             return False
-        if not pipe.objective:           # only cross-check single-answer requests (decision)
-            return False
-        # vision-using runs are forced single (the VLM is busy being the eyes)
         used = {t.tool for t in pipe.tasks.values() if t.tool}
         vision_caps = {"screen.describe", "screen.understand", "ui.locate"}
         for tool in used:
             spec = self.registry.get(tool)
             if spec and (set(getattr(spec, "capabilities", [])) & vision_caps):
                 return False
-        return pipe.draft_a is not None and bool((pipe.draft_a.text or "").strip())
+        return True
 
-    async def _match_passes(self, pipe: Pipe, retries: int) -> bool:
-        """v6 double-match: brain (draft_a) vs an independent vision pass (draft_b), compared on
-        FACTS (or by a model judge, per the agreement toggle). Retry up to `retries`; if they
-        never agree, FAIL with both shown. If no second model is available, degrade to single."""
+    def _wants_double(self, pipe: Pipe) -> bool:
+        return (self._double_eligible(pipe)
+                and pipe.draft_a is not None and bool((pipe.draft_a.text or "").strip()))
+
+    async def _match_passes(self, pipe: Pipe) -> bool:
+        """v7 double-match: draft B was already produced IN PARALLEL with draft A (direct branch /
+        compose task); here we only compare — on FACTS, or a model judge per the agreement toggle.
+        On mismatch the second pass is regenerated ONCE, then FAIL showing both. Repeatedly
+        re-rolling draft B until it happens to agree is agreement-by-exhaustion, which silently
+        defeats the point of double verification. Unusable second pass degrades to single."""
         vmodel = self._vision_model()
         if vmodel is None:
             return True                             # can't get a second opinion -> keep single
         mode = getattr(self.settings.autonomy, "agreement", "facts")
         detail: dict = {}
-        for i in range(retries):
-            draft_b = await self._second_pass(pipe, vmodel)
-            pipe.draft_b = draft_b
-            if not draft_b.ok:
+        for attempt in range(2):                    # compare, then at most ONE regeneration
+            if pipe.draft_b is None or not pipe.draft_b.ok:
+                pipe.draft_b = await self._second_pass(pipe, vmodel)
+            if not pipe.draft_b.ok:
                 await self._say(pipe, "Double verification: no usable second opinion — using single.")
                 return True                         # second pass unusable -> degrade to single
             if mode == "model":
-                agree, detail = await self._agree_model(pipe.draft_a.text, draft_b.text)
+                agree, detail = await self._agree_model(pipe.draft_a.text, pipe.draft_b.text)
             else:
-                agree, detail = facts_agree(pipe.draft_a.text, draft_b.text)
+                agree, detail = facts_agree(pipe.draft_a.text, pipe.draft_b.text)
             if agree:
                 await self._say(pipe, f"Double verification: passed ({mode}).")
                 return True
-            await self._say(pipe, f"Double verification: mismatch (attempt {i + 1}/{retries}).")
-        pipe.fail("double-verify", f"the two passes disagree after {retries} tries — {detail}\n\n"
+            if attempt == 0:
+                await self._say(pipe, "Double verification: mismatch — regenerating the second pass once.")
+                pipe.draft_b = None
+        pipe.fail("double-verify", f"the two passes disagree — {detail}\n\n"
                   f"[A] {pipe.draft_a.text}\n\n[B] {pipe.draft_b.text if pipe.draft_b else ''}")
         return False
 
@@ -741,17 +965,26 @@ class PipelineRunner:
                 why = "no answer was produced"
             elif bad:
                 why = "cited paths/values not in the tool results: " + "; ".join(bad[:5])
-            elif pipe.objective:
-                # Single correct answer -> strict correctness judge.
-                ok, why = await self._validity_check(model, pipe, draft, evidence)
-                if ok:
-                    return True
             elif pipe.grounded and evidence:
-                # Open-ended WORDING but must reflect the tool evidence (e.g. a screen summary):
-                # judge faithfulness to the evidence, not a single correct answer. Catches junk
-                # that a lenient check would pass.
-                ok, why = await self._grounded_check(model, pipe, draft, evidence)
-                if ok:
+                # There is tool evidence -> correctness IS faithfulness to what the tools returned.
+                # Checked BEFORE the objective branch so a tool-derived fact (e.g. "what year is it?"
+                # after a shell call) must MATCH the evidence, instead of being waved through by a
+                # weak correctness judge that shares the model's stale prior (that gave us "2024").
+                verdict, why = await self._grounded_check(model, pipe, draft, evidence)
+                if verdict is True:
+                    return True
+                if verdict is None:                       # judge gave no verdict -> fail OPEN
+                    await self._say(pipe, "Grounded judge returned no clear verdict — accepting the "
+                                          "answer (fail-open).")
+                    return True
+            elif pipe.objective:
+                # Single correct answer with NO tool evidence (e.g. arithmetic) -> correctness judge.
+                verdict, why = await self._validity_check(model, pipe, draft, evidence)
+                if verdict is True:
+                    return True
+                if verdict is None:                       # judge gave no verdict -> fail OPEN
+                    await self._say(pipe, "Validity judge returned no clear verdict — accepting the "
+                                          "answer (fail-open; a QA misfire shouldn't drop a good answer).")
                     return True
             else:
                 # Purely open-ended (e.g. "write a random paragraph"): accept any substantive,
@@ -783,26 +1016,45 @@ class PipelineRunner:
         pipe.fail("validate", f"answer failed validation after {retries} tries: {why}")
         return False
 
-    async def _validity_check(self, model, pipe: Pipe, draft: str, evidence: str) -> tuple[bool, str]:
+    async def _judge(self, model, sysp: str, user: str, default_why: str):
+        """One judge call that keeps the raw content, so a verdict can be salvaged from prose when
+        a chatty model doesn't emit clean JSON. Returns (True|False|None, why). None == no verdict
+        parsed -> caller decides (we fail open)."""
+        try:
+            resp = await asyncio.to_thread(lambda: model.chat(
+                [Message(role="system", content=sysp), Message(role="user", content=user)],
+                None, temperature=0, max_tokens=256))
+            content = resp.content or ""
+        except Exception:
+            logger.warning("validity judge call failed", exc_info=True)
+            return None, "judge unavailable"
+        data = _extract_json(content)
+        verdict = _verdict(data if isinstance(data, dict) else {}, content)
+        why = str((data.get("why") if isinstance(data, dict) else "") or default_why)
+        if verdict is None:
+            logger.warning("validity judge returned no parseable verdict (content=%r...)", content[:160])
+        return verdict, why
+
+    async def _validity_check(self, model, pipe: Pipe, draft: str, evidence: str):
         sysp = ('Judge whether the draft answer correctly and completely answers the user request, '
-                'using the tool evidence. Respond ONLY JSON: {"valid": true|false, "why": "<short>"}. '
+                'using the tool evidence. Output ONLY this JSON object and nothing else, no reasoning: '
+                '{"valid": true|false, "why": "<short>"}. '
                 'Invalid if it dodges the question, is incomplete, contradicts the evidence, or says '
                 'it cannot do something it was actually given the means to do. /no_think')
         user = f"Request: {pipe.normalized}\nEvidence:\n{evidence or '(none)'}\nDraft answer: {draft}"
-        data = await self._json(model, sysp, user, max_tokens=160)
-        return bool(data.get("valid")), str(data.get("why") or "not valid")
+        return await self._judge(model, sysp, user, "not valid")
 
-    async def _grounded_check(self, model, pipe: Pipe, draft: str, evidence: str) -> tuple[bool, str]:
+    async def _grounded_check(self, model, pipe: Pipe, draft: str, evidence: str):
         """For open-ended-but-grounded answers (summaries/descriptions): is the draft a real,
         faithful answer SUPPORTED by the evidence — not meta-text, not invented, not a dodge?
         Wording is free; faithfulness is required."""
         sysp = ('Judge whether the draft is a genuine answer to the request that is faithfully '
-                'supported by the evidence. Respond ONLY JSON: {"valid": true|false, "why": "<short>"}. '
+                'supported by the evidence. Output ONLY this JSON object and nothing else, no '
+                'reasoning: {"valid": true|false, "why": "<short>"}. '
                 'Invalid if it is empty, refuses, restates the instructions instead of answering, '
                 'or states things not supported by the evidence. Wording may differ freely. /no_think')
         user = f"Request: {pipe.normalized}\nEvidence:\n{evidence or '(none)'}\nDraft answer: {draft}"
-        data = await self._json(model, sysp, user, max_tokens=160)
-        return bool(data.get("valid")), str(data.get("why") or "not faithful to the evidence")
+        return await self._judge(model, sysp, user, "not faithful to the evidence")
 
     async def _redraft(self, pipe: Pipe, model, critique: str) -> None:
         """Re-produce the draft with the validity critique fed back in."""
@@ -828,7 +1080,7 @@ class PipelineRunner:
         try:
             resp = await asyncio.to_thread(lambda: model.chat(
                 [Message(role="system", content=sysp), Message(role="user", content=self._user(pipe))],
-                None, temperature=0.2, max_tokens=500))
+                None, temperature=0.2, max_tokens=1500))   # final answer — room for a long reply
             txt = strip_reasoning((resp.content or "").strip())
             if not txt:
                 return Result(ok=False, error="returned only reasoning")
@@ -874,6 +1126,56 @@ class PipelineRunner:
         await self.events.emit(pipe.run_id, RUN_CANCELLED, {"steps": len(pipe.results)})
         return RunResult(run_id=pipe.run_id, status="cancelled", steps=len(pipe.results))
 
+    # ===================== Memory v2: post-run auto-extraction =====================
+    _MEM_FASTPATH = {"identity", "preference", "entity", "goal"}   # promote to long-term on sight
+
+    def _maybe_extract_memories(self, pipe: Pipe) -> None:
+        """Fire-and-forget: after a run completes, extract durable facts into memory OFF the
+        response path. Toggle with vault.auto_extract. Never affects the answer or the run."""
+        vcfg = getattr(self.settings, "vault", None)
+        if not (getattr(vcfg, "auto_extract", True) and self.vault and self.model):
+            return
+        if not (pipe.answer or "").strip():
+            return
+        try:
+            asyncio.create_task(self._extract_memories(pipe.normalized, pipe.answer, pipe.run_id))
+        except RuntimeError:
+            logger.debug("no running loop for memory extraction; skipped", exc_info=True)
+
+    async def _extract_memories(self, request: str, answer: str, run_id: str) -> None:
+        sysp = (
+            "Extract durable facts worth remembering about the USER or their world from this "
+            'exchange. Respond ONLY JSON: {"memories":[{"text":"<atomic, self-contained fact>",'
+            '"type":"identity|preference|entity|goal|fact|event|task","confidence":0.0-1.0}]}. '
+            "Include only things useful to recall later — names, preferences, projects, goals, "
+            "commitments, stable facts. EXCLUDE transient chit-chat, general knowledge, and the "
+            'assistant\'s own phrasing. If nothing is worth remembering, return {"memories":[]}. /no_think')
+        try:
+            data = await self._json(self.model, sysp,
+                                    f"User said: {request}\nAssistant answered: {answer}", max_tokens=400)
+            atoms = data.get("memories") if isinstance(data, dict) else None
+            if not isinstance(atoms, list):
+                return
+            for a in atoms[:8]:
+                if not isinstance(a, dict):
+                    continue
+                text = str(a.get("text") or "").strip()
+                if len(text) < 3:
+                    continue
+                typ = str(a.get("type") or "fact").strip().lower()
+                try:
+                    conf = max(0.0, min(1.0, float(a.get("confidence", 0.6))))
+                except (TypeError, ValueError):
+                    conf = 0.6
+                note = self.vault.capture(redact(text), source=f"run:{run_id}")   # dedupes + embeds
+                rel = self.vault.rel(note.path)
+                self.store.set_memory_meta(rel, confidence=conf, source_run_id=run_id)
+                # Promotion layer 1 (type fast-path): identity/preference/entity/goal are durable.
+                if typ in self._MEM_FASTPATH:
+                    self.store.set_memory_tier(rel, "long")
+        except Exception:
+            logger.warning("memory extraction failed", exc_info=True)
+
     # ===================== suspend/resume question channel =====================
     def answer_question(self, question_id: str, text: str | None) -> bool:
         """Called by the API when the user answers a Multiresponse question (text=None cancels)."""
@@ -889,7 +1191,13 @@ class PipelineRunner:
         await self.events.emit(pipe.run_id, THOUGHT, {"content": text})
 
     def _user(self, pipe: Pipe) -> str:
-        return ((pipe.history_context + "\n\n") if pipe.history_context else "") + pipe.normalized
+        parts = []
+        if pipe.memory_context:
+            parts.append(pipe.memory_context)
+        if pipe.history_context:
+            parts.append(pipe.history_context)
+        parts.append(pipe.normalized)
+        return "\n\n".join(parts)
 
     def _pick_model(self, req):
         model = self.model
@@ -916,12 +1224,23 @@ class PipelineRunner:
 
     async def _json(self, model, system: str, user: str, max_tokens: int = 500) -> dict:
         try:
+            # Never send an empty user turn: many local models (e.g. gemma via LM Studio) reject
+            # {"role":"user","content":""} with HTTP 400. When the whole instruction lives in the
+            # system prompt (arg binding), give the user turn a minimal non-empty nudge.
             resp = await asyncio.to_thread(lambda: model.chat(
-                [Message(role="system", content=system), Message(role="user", content=user)],
+                [Message(role="system", content=system),
+                 Message(role="user", content=user or "Respond now with only the JSON object.")],
                 None, temperature=0, max_tokens=max_tokens))
-            return _extract_json(resp.content or "")
         except Exception:
+            # A dead/hung model here silently becomes "{}" downstream, which misroutes the whole
+            # run — make the cause visible in the log instead of guessing later.
+            logger.warning("model JSON call failed (system=%r...)", system[:80], exc_info=True)
             return {}
+        data = _extract_json(resp.content or "")
+        if not data:
+            logger.warning("model returned no parseable JSON (content=%r...)",
+                           (resp.content or "")[:200])
+        return data
 
     async def _bind_args(self, model, task: Task, spec, pipe: Pipe) -> dict:
         schema = spec.args_model.model_json_schema()
@@ -929,18 +1248,25 @@ class PipelineRunner:
                        for e in (spec.examples or [])[:3])
         prior = "\n".join(f"{k}: {json.dumps(v.data, default=str)[:300]}"
                           for k, v in pipe.inputs_for(task).items())
-        sysp = (f"Produce arguments for `{task.tool}` to: \"{task.intent}\". ONLY a JSON object "
-                f"matching: {json.dumps(schema.get('properties', {}))}.\n"
-                + (f"Examples:\n{ex}\n" if ex else "")
-                + (f"Prior results:\n{prior}\n" if prior else "")
-                + f"Request: {pipe.normalized} /no_think")
-        data = await self._json(model, sysp, "", max_tokens=300)
+        fields, required = _fields_block(schema)
+        sysp = (
+            f'Produce arguments for `{task.tool}` to: "{task.intent}". Give the values to call it with.\n'
+            f"Arguments (give a real VALUE for each you use — not its description):\n{fields}\n"
+            f"Required: {json.dumps(required)}\n"
+            'Output ONLY a JSON object mapping argument name -> value, e.g. {"path": "C:/Users"}. '
+            'Give actual values, never the schema: do NOT use "type"/"title"/"default"/"description" '
+            'as keys or values. Omit optional arguments you do not need. /no_think'
+            + (f"\nExamples:\n{ex}" if ex else "")
+            + (f"\nPrior results:\n{prior}" if prior else ""))
+        data = await self._json(model, sysp, f"Request: {pipe.normalized}", max_tokens=300)
         if not isinstance(data, dict):
             data = {}
         try:
             spec.args_model(**data)
-        except Exception:
-            pass
+        except Exception as e:
+            # Still returned (the executor + repair loop get a shot at it), but no longer silent.
+            logger.warning("bound args for %s failed schema validation: %s (args=%s)",
+                           task.tool, e, self._json_preview(data))
         return data
 
     async def _repair_args(self, model, task: Task, spec, pipe: Pipe, *,
@@ -951,11 +1277,14 @@ class PipelineRunner:
                        for e in (spec.examples or [])[:3])
         prior = "\n".join(f"{k}: {json.dumps(v.data, default=str)[:1200]}"
                           for k, v in pipe.inputs_for(task).items())
+        fields, required = _fields_block(schema)
         sysp = (
             f"Repair the arguments for `{task.tool}`. The previous attempt failed. "
             'Respond ONLY JSON: {"why":"<short cause>","arguments":{...corrected args...}}.\n'
-            f"Tool schema properties: {json.dumps(schema.get('properties', {}), default=str)}\n"
-            f"Required fields: {json.dumps(schema.get('required', []), default=str)}\n"
+            f"Arguments (give a real VALUE for each — not its description):\n{fields}\n"
+            f"Required fields: {json.dumps(required, default=str)}\n"
+            'A common mistake is echoing the schema: NEVER put "type"/"title"/"default"/"description" '
+            'as keys or values — put actual values (e.g. "path": "C:/Users", not the field spec). '
             "Use the prior tool results to fill missing fields. If focusing a window, infer a stable "
             "substring from the visible window titles. Do not leave required fields blank.\n"
             + (f"Examples:\n{ex}\n" if ex else "")

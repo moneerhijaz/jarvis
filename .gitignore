@@ -16,6 +16,7 @@ artifacts/            # screenshots of YOUR screen, run outputs — privacy
 *.sqlite
 *.sqlite-*
 fonts/
+results/
 
 # --- Python environments (machine-specific, huge) ---
 .venv/

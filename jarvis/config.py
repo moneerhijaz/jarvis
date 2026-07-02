@@ -42,6 +42,8 @@ class AutonomyCfg(BaseModel):
     max_retries: int = 3                                         # v6: re-attempts before a stage fails with explanation (feasibility, match, validity)
     verification: Literal["auto", "single", "double"] = "auto"  # double = brain+vision cross-check; auto = double when a 2nd host exists; vision-tasks are always single
     agreement: Literal["facts", "model"] = "facts"              # how double-verify compares the two passes: facts = deterministic containment; model = an extra model-judge call
+    question_timeout_s: int = 600                               # v6: a Multiresponse question unanswered this long fails the run (decision #4) instead of parking it forever
+    max_replans: int = 2                                        # v6: after a step fails, how many times to re-plan the remainder (with the failure as context) before the run fails
 
 
 class LimitsCfg(BaseModel):
@@ -124,6 +126,7 @@ class VaultScopeCfg(BaseModel):
 class VaultCfg(BaseModel):
     path: str = "./data/JarvisBrain"
     git_versioning: bool = False
+    auto_extract: bool = True   # Memory v2: after each run, extract durable facts into episodic memory
     embed: VaultEmbedCfg = Field(default_factory=VaultEmbedCfg)
     retrieval: VaultRetrievalCfg = Field(default_factory=VaultRetrievalCfg)
     gardener: VaultGardenerCfg = Field(default_factory=VaultGardenerCfg)

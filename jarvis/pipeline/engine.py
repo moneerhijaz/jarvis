@@ -38,6 +38,37 @@ def _settled(pipe) -> bool:
     return all(t.state in ("done", "failed", "skipped") for t in pipe.tasks.values())
 
 
+def find_cycle(pipe) -> list | None:
+    """Return one dependency cycle as a list of task ids, or None. Run before scheduling so a
+    bad plan fails immediately with the actual cycle instead of a late 'stuck' error."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {tid: WHITE for tid in pipe.tasks}
+    stack: list = []
+
+    def visit(tid) -> list | None:
+        color[tid] = GRAY
+        stack.append(tid)
+        for d in pipe.tasks[tid].depends_on:
+            if d not in pipe.tasks:
+                continue
+            if color[d] == GRAY:
+                return stack[stack.index(d):] + [d]
+            if color[d] == WHITE:
+                found = visit(d)
+                if found:
+                    return found
+        stack.pop()
+        color[tid] = BLACK
+        return None
+
+    for tid in list(pipe.tasks):
+        if color[tid] == WHITE:
+            found = visit(tid)
+            if found:
+                return found
+    return None
+
+
 async def _cancel(running: dict) -> None:
     for fut in running.values():
         fut.cancel()
@@ -52,6 +83,12 @@ async def run_pipeline(pipe, run_task: RunTask, budget,
     the next scan, so the graph can grow while it executes."""
     is_cancelled = is_cancelled or (lambda: False)
     running: dict[str, asyncio.Future] = {}
+
+    cycle = find_cycle(pipe)
+    if cycle:
+        pipe.status = "failed"
+        pipe.failure = f"engine: dependency cycle {' -> '.join(cycle)}"
+        return
 
     while True:
         if is_cancelled():
@@ -88,7 +125,11 @@ async def run_pipeline(pipe, run_task: RunTask, budget,
             pipe.failure = f"engine: stuck — unmet dependencies for {stuck}"
             return
 
-        done, _ = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
+        # Watchdog: wake up periodically even if nothing completes, so cancellation and the
+        # time budget are enforced WHILE tasks are in flight (a parked ask / slow tool can no
+        # longer freeze the run past its deadline).
+        done, _ = await asyncio.wait(running.values(), timeout=1.0,
+                                     return_when=asyncio.FIRST_COMPLETED)
         for fut in done:
             tid = next(k for k, v in running.items() if v is fut)
             running.pop(tid, None)

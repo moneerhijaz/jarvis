@@ -23,7 +23,7 @@ dependencies = [
 # keyword+graph when no embedder is present.
 vector = ["lancedb>=0.6", "numpy>=1.26"]
 embed = ["sentence-transformers>=2.6"]
-voice = ["faster-whisper>=1.0", "piper-tts>=1.2"]
+voice = ["faster-whisper>=1.2.1", "piper-tts>=1.2"]
 kokoro = ["kokoro>=0.7", "soundfile>=0.12", "numpy>=1.26"]
 # Agentic computer control (AGENTIC_PLAN). Windows desktop automation + screen.
 control = ["mss>=9.0", "Pillow>=10.0", "pyautogui>=0.9.54", "pygetwindow>=0.0.9", "uiautomation>=2.0", "keyboard>=0.13"]

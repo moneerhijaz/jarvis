@@ -15,7 +15,7 @@ dependencies = [
     "PyYAML>=6.0",
     "send2trash>=1.8",
     "python-frontmatter>=1.1",
-    "python-multipart>=0.0.9",
+    "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]

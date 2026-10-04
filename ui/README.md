@@ -17,7 +17,7 @@ talk to (voice-first), with a live agent activity timeline and a text-chat toggl
 
 ## Prerequisites
 
-1. Backend running with deps installed (from `alpha/prod`):
+1. Backend running with deps installed (from `the repository root`):
    ```powershell
    .\.venv\Scripts\Activate.ps1
    pip install -e ".[dev,voice]"      # 'voice' adds faster-whisper + piper-tts
@@ -41,7 +41,7 @@ talk to (voice-first), with a live agent activity timeline and a text-chat toggl
 
 ## Run (development)
 
-Two terminals from `alpha/prod`:
+Two terminals from `the repository root`:
 
 ```powershell
 # Terminal 1 — backend (http://127.0.0.1:8765)
@@ -50,7 +50,7 @@ python -m jarvis.main serve
 
 # Terminal 2 — UI (http://localhost:5173, proxies /api to the backend)
 cd ui
-npm install
+npm ci
 npm run dev
 ```
 
@@ -61,7 +61,7 @@ counts, so this works without HTTPS.
 
 ```powershell
 cd ui
-npm install
+npm ci
 npm run build          # outputs ui/dist
 cd ..
 python -m jarvis.main serve   # backend auto-serves ui/dist at http://127.0.0.1:8765

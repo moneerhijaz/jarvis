@@ -1,104 +1,92 @@
-# JARVIS — backend (PLANv3)
+# JARVIS
 
-Local-first personal AI assistant backend. Implements the PLANv3 spine:
-LM Studio model gateway, typed tool system with subsetting, a ReAct agent loop
-with governors + kill switch, reversible filesystem/shell tools, a FastAPI + SSE
-API, and the headline of PLANv3 — a **plain-text Markdown "second brain" vault**
-as canonical memory (profile auto-load, wikilink graph, hybrid retrieval,
-projects, skills, and a gardener).
+A local-first personal AI assistant with a Python backend, React web console,
+OpenAI-compatible model gateway, and a plain-text Markdown memory vault.
+It includes a staged agent pipeline, filesystem and shell tools, optional
+Windows desktop control, and optional local speech recognition and synthesis.
 
-The web/app UI is intentionally **not** built yet (per request) — confirm the
-design first, then the UI attaches to this API.
+This is experimental software. The API has no authentication and can execute
+commands and access local files. Keep it bound to `127.0.0.1`; do not expose it
+to the internet or an untrusted network. Review tool permissions before use.
 
 ## Requirements
 
 - Python 3.10+ (3.12 recommended).
-- [LM Studio](https://lmstudio.ai) running its local server at
-  `http://127.0.0.1:1234/v1` with a tool-calling-capable model loaded
-  (e.g. a Qwen-class ~9–14B). Verify your GPU with `nvidia-smi` (the desktop
-  RTX 3060 is 12 GB).
+- LM Studio or an OpenAI-compatible local model server, normally at
+  `http://127.0.0.1:1234/v1`, with a tool-calling model loaded.
+- Node.js 20.19+ for the optional React UI.
+- Windows for Windows-specific desktop automation tools.
 
-## Setup
+## Quick start
+
+Run from the repository root:
 
 ```bash
-cd alpha/prod
 python -m venv .venv
-. .venv/Scripts/activate          # Windows PowerShell:  .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"           # add ".[dev,embed,vector]" for local embeddings/vector search
-```
-
-## Run
-
-```bash
-# Health check (talks to LM Studio):
-python -m jarvis.main health
-
-# One-shot headless task (uses LM Studio):
-python -m jarvis.main run "create hello.txt in this folder that says hi" --cwd .
-
-# Start the API server (http://127.0.0.1:8765):
+source .venv/bin/activate
+# Windows PowerShell: .\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 python -m jarvis.main serve
 ```
 
-Key endpoints: `GET /api/health`, `GET /api/models`, `POST /api/runs`,
-`GET /api/runs/{id}/events` (SSE), `POST /api/runs/{id}/cancel`, `GET /api/tools`,
-`POST /api/vault/search`, `GET /api/vault/profile`, `GET /api/audit`,
-`POST /api/rollback/{token}`, `GET /api/settings`.
-
-## Tests
+Open `http://127.0.0.1:8765`. The backend serves the built React UI when
+`ui/dist` exists, otherwise its bundled web interface.
 
 ```bash
-pytest                 # full suite (needs deps installed)
+# Optional React UI build
+cd ui
+npm ci
+npm run build
 ```
 
-The suite covers: vault I/O + frontmatter + wikilink graph + hybrid retrieval +
-gardener + reindex; reversible fs tools (snapshot/trash + rollback); shell
-tripwire + execution; tool subsetting; the agent loop end-to-end via a
-`FakeModelClient` (no LM Studio needed); step-budget and no-progress governors;
-redaction; and the health/tools API.
+For UI development, run `npm run dev` from `ui` while the backend is running.
+See [UI instructions](ui/README.md) for voice setup and development details.
 
-## Configuration
+```bash
+python -m jarvis.main health
+python -m jarvis.main run "create hello.txt in this folder that says hi" --cwd .
+```
 
-Defaults live in `config/default.yaml`. Override via `config/local.yaml`
-(git-ignored) or env vars (`JARVIS__SECTION__KEY=value`). Point `vault.path` at a
-real location (e.g. `C:/Users/<you>/JarvisBrain`) and, optionally, set
-`vault.git_versioning: true` and `vault.embed.mode: lmstudio` (or `in_process`
-with the `embed` extra) to enable vector retrieval.
+## Configuration and privacy
+
+Copy `config/local.yaml.example` to `config/local.yaml` for local overrides.
+Defaults live in `config/default.yaml`; environment overrides use
+`JARVIS__SECTION__KEY=value`. Run commands from the repository root so the
+configuration and relative data paths resolve consistently.
+
+Conversation databases and the memory vault live under `data/`; screenshots
+and other outputs live under `artifacts/`. These directories, logs, credentials,
+and local configuration are ignored by Git. Review files before committing:
+ignore rules do not protect files already tracked or explicitly force-added.
+
+Optional install extras include `voice`, `kokoro`, `embed`, `vector`, `control`,
+`ocr`, and `websearch`. Models must be downloaded separately. Core tests use
+fake model clients and do not require LM Studio.
+
+## Development
+
+```bash
+pytest -q
+cd ui
+npm ci
+npm run build
+```
+
+See [contributing](CONTRIBUTING.md) and [security](SECURITY.md) for contribution
+and vulnerability reporting guidance. Historical design documents in `plan/`
+and the root planning files describe proposals as well as implemented features.
 
 ## Layout
 
-```
-jarvis/
-  config.py          # layered typed settings
-  events.py          # Event + EventSink (durable + realtime fanout)
-  app.py             # composition root (wires everything)
-  main.py            # jarvisd entrypoint + tiny CLI
-  model/             # ModelClient protocol, LM Studio adapter, FakeModelClient, context
-  tools/             # contract, registry+subsetting, executor, fs/shell/meta/vault tools
-  memory/            # vault (canonical Markdown), index (SQLite catalog + links), graph, retrieval, gardener
-  agent/             # run state, ReAct loop with governors/kill switch, prompts
-  security/          # redaction, policy/tripwires, rollback manager
-  data/              # SQLite operational store
-  api/               # FastAPI server + SSE
-config/              # default.yaml
-tests/               # unit + integration + end-to-end (FakeModelClient)
-```
+- `jarvis/api/`: FastAPI API and event streaming.
+- `jarvis/pipeline/`: agent planning and execution pipeline.
+- `jarvis/tools/`: filesystem, shell, browser, desktop, and memory tools.
+- `jarvis/memory/`: Markdown vault, indexing, retrieval, and maintenance.
+- `jarvis/security/`: policy checks, redaction, and rollback support.
+- `jarvis/voice/`: optional local speech services.
+- `ui/`: React + Vite console.
+- `tests/`: automated checks and separate manual live-model scripts.
 
-## Design notes
+## License
 
-- **Memory is plain text you own.** The vault Markdown is canonical; the SQLite
-  note catalog (with content hashes for change detection), the persisted wikilink
-  edges, and any vector index are rebuildable caches (`vault.reindex`). Swap the
-  model and the brain survives.
-- **Reversible by default.** Overwrites snapshot; deletes go to the Recycle Bin;
-  bulk moves record an undo manifest — all rollback-able from `/api/rollback`.
-- **Keys, not prompts.** Tripwires and path scope are enforced in code; future
-  live-data connectors are read-only/scoped, not governed by prompt text.
-- **Swappable runtime.** Everything talks OpenAI-compatible; point `base_url` at
-  Ollama/llama.cpp without code changes.
-
-## Not yet implemented (deferred by design)
-
-Browser (Playwright) and Windows GUI (pywinauto/UIA) tools, voice, the scheduler
-daemon, MCP client, and the web UI. The interfaces and namespaces are in place so
-these attach without disturbing the core.
+See [LICENSE](LICENSE) for the GNU General Public License, version 3.

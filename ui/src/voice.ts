@@ -8,7 +8,7 @@ export class Recorder {
   private stream: MediaStream | null = null;
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
-  private data: Uint8Array | null = null;
+  private data: ReturnType<typeof Uint8Array.from> | null = null;
 
   get level(): number {
     if (!this.analyser || !this.data) return 0;

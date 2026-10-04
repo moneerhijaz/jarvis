@@ -1,0 +1,10 @@
+# Extend the standard rules; exempt only the known synthetic redaction fixture.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic token used to test secret redaction"
+paths = ['''^tests/test_agent_and_api\.py$''']
+regexTarget = "secret"
+regexes = ['^ghp_abcdefghij1234567890$']
+condition = "AND"

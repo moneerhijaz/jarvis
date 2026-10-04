@@ -9,10 +9,14 @@ config/*.local.yaml
 .env.*
 
 # --- Runtime + personal data (NEVER canonical) ---
-data/                 # sqlite DB = your conversation history; the vault (JarvisBrain) lives here
-logs/                 # run logs may contain transcripts / paths
-artifacts/            # screenshots of YOUR screen, run outputs — privacy
-**/.jarvis/           # rebuildable vault index cache
+# SQLite conversation history and personal memory vault
+/data/
+# Logs may contain transcripts and paths
+/logs/
+# Private screenshots and run outputs
+/artifacts/
+# Rebuildable vault index cache
+**/.jarvis/
 *.sqlite
 *.sqlite-*
 fonts/
@@ -70,3 +74,15 @@ test_loop.c
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local credentials, databases, and filesystem probes
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.db-*
+*.sqlite3
+*.sqlite3-*
+/.__rwx_test
+/.sync_probe

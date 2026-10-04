@@ -21,7 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 # Heavy/optional. The backend runs without these; retrieval falls back to
 # keyword+graph when no embedder is present.
-vector = ["lancedb>=0.6", "numpy>=1.26"]
+vector = ["lancedb>=0.39.0", "numpy>=1.26"]
 embed = ["sentence-transformers>=2.6"]
 voice = ["faster-whisper>=1.0", "piper-tts>=1.2"]
 kokoro = ["kokoro>=0.7", "soundfile>=0.12", "numpy>=1.26"]

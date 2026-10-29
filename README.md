@@ -87,6 +87,8 @@ and the root planning files describe proposals as well as implemented features.
 - `ui/`: React + Vite console.
 - `tests/`: automated checks and separate manual live-model scripts.
 
+See [implementation boundaries](docs/PORTFOLIO.md) for the component diagram and what core tests do not establish.
+
 ## License
 
 See [LICENSE](LICENSE) for the GNU General Public License, version 3.
